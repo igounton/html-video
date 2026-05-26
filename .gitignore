@@ -1,0 +1,63 @@
+# macOS
+.DS_Store
+._*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.npm
+.yarn-integrity
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+.pnp.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+*.egg-info/
+
+# Build / dist
+dist/
+build/
+out/
+.next/
+.cache/
+.parcel-cache/
+*.tsbuildinfo
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# Wrangler / Cloudflare
+.wrangler/
+.dev.vars
+
+# Local-only working files
+scratch/
+tmp/
+
+# Generated video output (large binaries)
+*.mp4
+*.webm
+*.mov
+*.gif
+output/
+renders/
