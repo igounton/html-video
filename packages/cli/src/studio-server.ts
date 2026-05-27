@@ -712,11 +712,18 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
   parts.push(`Rules:`);
   parts.push(`- Use 2–6 options. If a question is genuinely open-ended, ask in plain prose instead.`);
   parts.push(`- Each option label is short (≤ 30 chars). \`hint\` is optional, one clarifying line.`);
-  parts.push(`- Concrete, distinct options scoped to the current project — don't invent choices the user wouldn't realistically pick.`);
+  parts.push(`- Concrete, distinct options. Don't invent choices the user wouldn't realistically pick.`);
   parts.push(`- The hv-options block must be the only block in that turn (markdown preamble above is fine; no prose after).`);
-  parts.push(`- \`allow_freeform: true\` lets the user type a custom answer too — set this when applicable.`);
-  parts.push(`- Good moments: tone (Casual / Formal / Energetic), palette (Warm / Cool / Mono), keep-vs-replace decisions.`);
+  parts.push(`- Set \`allow_freeform: true\` when the user might want a custom answer.`);
   parts.push(`- Skip this format when there's no clean small set; just ask in prose.`);
+  parts.push('');
+  parts.push(`## Avoid template-name tunnel vision`);
+  parts.push(`Don't let the template's name (e.g. "Logo Outro Frame") force every option into that single use case.`);
+  parts.push(`Templates are visual skeletons — users repurpose them. A "Logo Outro" template can also become an opener, a 30-second product teaser, a recurring motion brand block, or a full short-form video. So when you offer choices about scope or use case, include at least one option that opens the door wider:`);
+  parts.push(`- "Use this as the visual style for a longer / full-length video"`);
+  parts.push(`- "Series of short videos sharing this style"`);
+  parts.push(`- "Adapt the style to a completely different scenario"`);
+  parts.push(`Pick whichever is most likely given the user's signal. The point: never force the user to stay inside the template's literal name.`);
 
   return parts.join('\n');
 }
