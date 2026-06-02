@@ -554,12 +554,21 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
               const updatedProject = await ctx.orchestrator.addFileAsset(id, p.tmpPath);
               const newAsset = updatedProject.assets[updatedProject.assets.length - 1];
               if (newAsset) {
-                attachments.push({
+                const att: Attachment = {
                   path: newAsset.path ?? p.tmpPath,
                   kind: newAsset.type as Attachment['kind'],
                   filename: p.filename,
                   size: newAsset.metadata.sizeBytes ?? 0,
-                });
+                };
+                // Inline small text/data uploads so the agent (incl. HTTP ones)
+                // actually sees the content, not just a local path.
+                if ((newAsset.type === 'text' || newAsset.type === 'data') && newAsset.path) {
+                  try {
+                    const txt = await readFile(newAsset.path, 'utf8');
+                    if (txt.length <= 20_000) att.inlineText = txt;
+                  } catch { /* fall back to path-only */ }
+                }
+                attachments.push(att);
               }
             }
           }
@@ -597,6 +606,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
                 kind: 'text',
                 filename: `${host}.md`,
                 size: src.markdown.length,
+                inlineText: src.markdown,
               });
               process.stderr.write(
                 `[studio:fetch-source] ${src.kind} ${sourceUrl} → ${src.markdown.length} chars${src.truncated ? ' (truncated)' : ''}\n`,
@@ -1343,6 +1353,13 @@ interface Attachment {
   filename: string;
   /** byte size */
   size: number;
+  /**
+   * For text sources (fetched articles/repos, uploaded .md/.txt), the actual
+   * content — inlined directly into the prompt. A bare path is useless to HTTP
+   * agents (Messages API runs in the cloud, can't read local disk), and even
+   * for CLI agents the content should be the source material, not a file ref.
+   */
+  inlineText?: string;
 }
 
 /**
@@ -1614,6 +1631,23 @@ function lastTypePick(history: ChatMessage[]): string | undefined {
   return undefined;
 }
 
+/**
+ * Render one attachment for the prompt. Text sources with inlined content get
+ * their actual content fenced inline (so HTTP agents that can't read local
+ * disk still see it); binary/path-only attachments stay a one-line reference.
+ */
+function renderAttachment(a: Attachment): string[] {
+  if (a.inlineText) {
+    return [
+      `- [${a.kind}] ${a.filename} — full content below:`,
+      '```',
+      a.inlineText,
+      '```',
+    ];
+  }
+  return [`- [${a.kind}] ${a.filename} — ${a.path}`];
+}
+
 function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
   const { tmpl, exampleHtml, priorHtml, history, userText, attachments } = args;
 
@@ -1836,9 +1870,8 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push('');
     if (attachments.length > 0) {
       p.push(`Attachments:`);
-      for (const a of attachments) p.push(`- [${a.kind}] ${a.filename} — ${a.path}`);
-      p.push(`Use these as actual assets where appropriate (logo, screenshot, data file).`);
-      p.push(`Text attachments (e.g. .md files) holding article or repository content are the SOURCE MATERIAL — read them and base the video's actual content (facts, names, numbers, narrative) on them, don't just decorate with them.`);
+      for (const a of attachments) p.push(...renderAttachment(a));
+      p.push(`Use binary attachments (images, data files) as actual assets where appropriate (logo, screenshot, data file). The inlined text/article/repo content above is the SOURCE MATERIAL — base the video's actual content (facts, names, numbers, narrative) on it, don't just decorate with it.`);
       p.push('');
     }
     p.push(`Constraints: full-bleed ${resolution}, opens with an animation timeline, inline CSS + JS, single complete <!doctype html>...</html> document(s). CDN imports (Tailwind, GSAP) are fine. Tag every visible text node with data-hv-text set to a stable key (brand_name, headline, item_1, cta…). No prose outside code blocks.`);
@@ -1948,7 +1981,7 @@ h1{font-size:8vw;letter-spacing:-.03em;animation:in 1.2s ease forwards;opacity:0
   it.push('');
   if (attachments.length > 0) {
     it.push(`# Attachments`);
-    for (const a of attachments) it.push(`- [${a.kind}] ${a.filename} — ${a.path}`);
+    for (const a of attachments) it.push(...renderAttachment(a));
     it.push('');
   }
   if (baseHtml) {
@@ -2238,8 +2271,8 @@ h1{font-size:8vw;letter-spacing:-.03em;animation:in 1s ease forwards;opacity:0;t
     }
     if (i === 0 && attachments.length > 0) {
       fp.push('');
-      fp.push(`User attachments (use as actual assets if the frame can use them):`);
-      for (const a of attachments) fp.push(`- [${a.kind}] ${a.filename} — ${a.path}`);
+      fp.push(`User attachments (binary = assets; inlined text = source material to base content on):`);
+      for (const a of attachments) fp.push(...renderAttachment(a));
     }
     fp.push('');
     fp.push(`Do NOT return an empty reply. Output the full HTML.`);
