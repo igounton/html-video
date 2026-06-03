@@ -229,10 +229,13 @@ async function startExportStream() {
 function isExportIntent(text) {
   if (!text) return false;
   const t = text.trim();
-  if (t.length > 80) return false; // long messages are obviously content / iterate requests
-  return /(?:^|\s)(export|render|encode|生成视频|导出|输出 ?mp4|出片)(?:$|\s|视频|为 ?mp4|成 ?mp4)/i.test(t)
-    || /^\s*(export|render|encode|导出|出片|生成 ?mp4|输出 ?mp4)\s*$/i.test(t)
-    || /(?:导出|输出|生成|渲染|出).{0,4}(?:mp4|视频|片子|片)/i.test(t);
+  if (t.length > 40) return false;        // long messages are content / iterate requests
+  if (/https?:\/\//i.test(t)) return false; // a link is ALWAYS source material to build from, never "export"
+  // "生成/做一个视频" is the most common way to ask to CREATE a video — it must
+  // NOT count as export. Only match explicit export/render verbs that target an
+  // already-produced result: 导出 / 出片 / 渲染 / export / render / encode / 输出mp4.
+  return /^\s*(?:export|render|encode|导出(?:视频|为?\s?mp4)?|出片|渲染|输出\s?mp4|存为\s?mp4)\s*$/i.test(t)
+    || /(?:^|\s)(?:导出|出片|渲染成?|export|render|encode)(?:$|\s|视频|为?\s?mp4|成\s?mp4)/i.test(t);
 }
 
 async function revealExportedFile() {
