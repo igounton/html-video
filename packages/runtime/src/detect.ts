@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
 import { promisify } from 'node:util';
 import { AGENT_DEFS } from './registry.js';
 import type { AgentDef, DetectedAgent } from './types.js';
@@ -12,6 +13,21 @@ async function which(bin: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** PATH lookup first; then any absolute binFallbacks that exist + are runnable. */
+async function resolveBin(def: AgentDef): Promise<string | null> {
+  const onPath = await which(def.bin);
+  if (onPath) return onPath;
+  for (const candidate of def.binFallbacks ?? []) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      /* not there / not executable — try next */
+    }
+  }
+  return null;
 }
 
 async function probeVersion(bin: string, args: string[]): Promise<string | null> {
@@ -36,7 +52,7 @@ export async function detectOne(def: AgentDef): Promise<DetectedAgent> {
       ...(def.installUrl !== undefined && { installUrl: def.installUrl }),
     };
   }
-  const path = await which(def.bin);
+  const path = await resolveBin(def);
   if (!path) {
     return {
       id: def.id,
@@ -46,7 +62,22 @@ export async function detectOne(def: AgentDef): Promise<DetectedAgent> {
       ...(def.installUrl !== undefined && { installUrl: def.installUrl }),
     };
   }
-  const version = await probeVersion(path, def.versionArgs);
+  let version = await probeVersion(path, def.versionArgs);
+  // Found on disk — but some agents need a further gate (e.g. AMR login state).
+  if (def.extraDetect) {
+    const extra = await def.extraDetect(path);
+    if (extra.version !== undefined && extra.version !== null) version = extra.version;
+    return {
+      id: def.id,
+      name: def.name,
+      bin: def.bin,
+      available: extra.available,
+      path,
+      version,
+      ...(extra.hint !== undefined && { hint: extra.hint }),
+      ...(def.installUrl !== undefined && { installUrl: def.installUrl }),
+    };
+  }
   return {
     id: def.id,
     name: def.name,

@@ -13,6 +13,11 @@ export interface AgentDef {
    *  pseudo name that doctor() displays but never spawns — set it to something
    *  recognisable like "anthropic-api". */
   bin: string;
+  /** Absolute-path fallbacks tried (in order) when `bin` is not on PATH.
+   *  Used for agents shipped inside another app bundle — e.g. AMR's `vela`
+   *  lives in Open Design.app, not on PATH. List real candidate paths; the
+   *  first existing one wins and is used as the spawn binary. */
+  binFallbacks?: string[];
   /** Args to print version (used in `doctor`). Ignored for http agents. */
   versionArgs: string[];
   /** Build the argv list given the user prompt. Ignored for http agents. */
@@ -22,10 +27,20 @@ export interface AgentDef {
    * - `plain`: free-form text (everything printed is output)
    * - `claude-stream`: claude --output-format stream-json (NDJSON wrapped events)
    * - `json-event-stream`: NDJSON {type, ...} event stream
+   * - `acp-json-rpc`: bidirectional ACP JSON-RPC over stdio (AMR/vela). Spawn
+   *   stays open; we drive initialize → session/new → session/prompt and read
+   *   streamed session/update notifications. Handled by a dedicated path.
    */
-  streamFormat: 'plain' | 'claude-stream' | 'json-event-stream';
+  streamFormat: 'plain' | 'claude-stream' | 'json-event-stream' | 'acp-json-rpc';
   /** Pass prompt via stdin instead of argv (recommended for long prompts) */
   promptViaStdin?: boolean;
+  /**
+   * Optional extra availability gate run AFTER the binary is found (child
+   * agents only). Lets an agent report "installed but not usable" — e.g. AMR
+   * is on disk but the user isn't logged in. Return available=false + a hint.
+   * `resolvedBin` is the path that detection settled on (PATH or a fallback).
+   */
+  extraDetect?: (resolvedBin: string) => Promise<{ available: boolean; version?: string | null; hint?: string }>;
   /** Extra fixed env vars on spawn */
   env?: Record<string, string>;
   /** Where to find install instructions */
@@ -69,6 +84,8 @@ export interface DetectedAgent {
   path?: string;
   version?: string | null;
   installUrl?: string;
+  /** Why it's unavailable / what to do — e.g. AMR found but not logged in. */
+  hint?: string;
 }
 
 export type AgentEvent =
