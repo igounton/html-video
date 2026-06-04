@@ -267,6 +267,10 @@ async function selectProject(id) {
   state.activeFrameId = null;  // reset frame selection on project switch
   state.iterateFocusFrameId = null;
   state.editTextMode = false;
+  // A generation running for the PREVIOUS project keeps going on the backend
+  // (its result persists); just release the composer so this project is usable.
+  // The in-flight SSE loop self-stops once it sees selectedId changed.
+  state.composing = false;
   try { state.messages = (await API.getMessages(id)).messages ?? []; }
   catch { state.messages = []; }
   renderSidebar();
@@ -2260,6 +2264,9 @@ async function sendMessage() {
 
   ta.value = '';
   state.composing = true;
+  // The project this send belongs to — used to ignore late events / not clobber
+  // a different project if the user switches away mid-generation.
+  const genProjectId = state.selectedId;
   renderComposer();
 
   // Iterate scope: when the user has selected a specific frame in the
@@ -2316,9 +2323,13 @@ async function sendMessage() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
+      // If the user switches away mid-generation, stop rendering its events into
+      // the (now different) active project — the backend keeps running and
+      // persists the result, so it's there when they switch back.
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (state.selectedId !== genProjectId) { try { await reader.cancel(); } catch {} break; }
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split('\n\n');
         buf = lines.pop() ?? '';
@@ -2383,11 +2394,19 @@ async function sendMessage() {
       }
     }
   } catch (e) {
-    state.messages[thinkingIdx] = { role: 'system', content: '⚠️ ' + (e.message ?? e), ts: Date.now() };
-    renderChatLog();
+    // Only surface the error if we're still on the project that started this
+    // send — otherwise it's just the user having navigated away.
+    if (state.selectedId === genProjectId) {
+      state.messages[thinkingIdx] = { role: 'system', content: '⚠️ ' + (e.message ?? e), ts: Date.now() };
+      renderChatLog();
+    }
   }
-  state.composing = false;
-  renderComposer();
+  // Don't clobber composing if the user already switched to another project
+  // (which may have its own generation running).
+  if (state.selectedId === genProjectId) {
+    state.composing = false;
+    renderComposer();
+  }
 }
 
 // ============== gallery modal ==============

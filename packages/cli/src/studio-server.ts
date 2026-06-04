@@ -317,7 +317,10 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           'cache-control': 'no-cache',
           connection: 'keep-alive',
         });
-        const sse = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        const sse = (obj: unknown) => {
+          try { if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`); }
+          catch { /* client gone — generation keeps running, result is persisted */ }
+        };
         const t0 = Date.now();
         try {
           sse({ type: 'export_started' });
@@ -360,7 +363,10 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           'cache-control': 'no-cache',
           connection: 'keep-alive',
         });
-        const sse = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        const sse = (obj: unknown) => {
+          try { if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`); }
+          catch { /* client gone — generation keeps running, result is persisted */ }
+        };
         try {
           sse({ type: 'audio_started' });
           const creds = ctx.mediaConfig.resolveMinimax();
@@ -868,7 +874,14 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           connection: 'keep-alive',
         });
 
-        const sseWrite = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        // Tolerant write: if the client navigated away (switched project) the
+        // socket is gone and res.write throws. Swallow it so generation keeps
+        // running to completion and still persists to messages.json — the user
+        // sees the finished result when they come back, instead of a killed task.
+        const sseWrite = (obj: unknown) => {
+          try { if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`); }
+          catch { /* client disconnected — keep generating, result is persisted below */ }
+        };
 
         let assistantText = '';
         let textChunks = 0;
@@ -1040,7 +1053,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         // actionable instead of a blank speech bubble.
         if (!persistText.trim()) {
           const fallback = '⚠️ The agent returned an empty reply. Try rephrasing your request — e.g. tell it the brand / topic / 1-2 concrete details, or which kind of frame you want first.';
-          res.write(`data: ${JSON.stringify({ type: 'text', chunk: fallback })}\n\n`);
+          sseWrite({ type: 'text', chunk: fallback });
           persistText = fallback;
         }
         history.push({
