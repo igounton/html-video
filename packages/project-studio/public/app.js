@@ -2704,11 +2704,15 @@ const AGENT_LOGOS = {
   'codex': '/agent-icons/codex.svg',
   'hermes': '/agent-icons/hermes.svg',
   'amr': '/agent-icons/amr.svg',
+  'gemini': '/agent-icons/gemini.svg',
+  'grok': '/agent-icons/grok.svg',
+  'qwen': '/agent-icons/qwen.svg',
+  'opencode': '/agent-icons/opencode.svg',
+  'copilot': '/agent-icons/copilot.svg',
+  'aider': '/agent-icons/aider.png',
 };
 const AGENT_ICON_FALLBACK = {
   'anthropic-api': '☁️',
-  'gemini': '🟦',
-  'grok': '🟪',
 };
 function agentIconHtml(id) {
   const logo = AGENT_LOGOS[id];
