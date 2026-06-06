@@ -902,7 +902,56 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           phaseInfo.phase === 'generate' &&
           Number(phaseInfo.inputs.collected?.frame_count ?? '1') > 1;
 
-        if (isMultiGenerate) {
+        // Iterate on a multi-frame project where the user wants a CONTENT change
+        // (not a visual tweak) and hasn't pinned a single frame: re-plan the
+        // whole storyboard instead of rewriting just one frame's HTML. Without
+        // this, "内容改一下，基于 X 来写" left the content-graph (and the other
+        // frames) on the old subject. Classify first (one short model call, only
+        // on this narrow path) so visual tweaks still take the cheap single
+        // rewrite below.
+        const isMultiFrameProject =
+          (project.frames ?? []).length > 1 ||
+          Number(phaseInfo.inputs.collected?.frame_count ?? '1') > 1;
+        let rewriteInputs: PhaseInputs | undefined;
+        if (phaseInfo.phase === 'iterate' && !focusFrameId && isMultiFrameProject) {
+          const openingTopic =
+            history.find((m) => m.role === 'user')?.content?.trim().slice(0, 200) ?? '';
+          let synopsis: string | undefined;
+          try {
+            const g = await ctx.orchestrator.readContentGraph(id);
+            synopsis = g?.synopsis;
+          } catch { /* no graph yet — fine */ }
+          const intent = await classifyIterateIntent(
+            agentDef,
+            userText,
+            { frameCount: (project.frames ?? []).length || Number(phaseInfo.inputs.collected?.frame_count ?? '3'), openingTopic, currentSynopsis: synopsis },
+            projectDir,
+            agentModel,
+          );
+          process.stderr.write(`[studio:msg] proj=${id} iterate-intent=${intent} user=${JSON.stringify(userText.slice(0, 60))}\n`);
+          if (intent === 'rewrite-all') {
+            // Carry the user's NEW instruction into contentTurns so the graph is
+            // re-planned around the new subject (e.g. "Open Design") rather than
+            // re-deriving the stale synopsis. Drop control phrases ("重做"/"继续").
+            const turns = [...collectContentTurns(history), userText].filter((s) => !isControlPhrase(s));
+            rewriteInputs = {
+              ...phaseInfo.inputs,
+              pickedType: lastCardPickByPhase(history, 'type') ?? phaseInfo.inputs.pickedType,
+              pickedStyle: lastCardPickByPhase(history, 'style') ?? phaseInfo.inputs.pickedStyle ?? '',
+              contentTurns: turns,
+            };
+          }
+        }
+
+        if (isMultiGenerate || rewriteInputs) {
+          // rewrite-all warns the user that hand-tuned frames will be replaced —
+          // soft notice, no confirmation gate (the regeneration proceeds).
+          if (rewriteInputs) {
+            const n = (project.frames ?? []).length || Number(phaseInfo.inputs.collected?.frame_count ?? '3');
+            const notice = `🔄 基于新内容重做全部 ${n} 帧（已手动修改过的帧会被覆盖）…\n`;
+            assistantText += notice;
+            sseWrite({ type: 'text', chunk: notice });
+          }
           try {
             const result = await runSplitMultiFrameGenerate({
               ctx,
@@ -912,7 +961,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
               agentModel,
               tmpl,
               priorHtml,
-              inputs: phaseInfo.inputs,
+              inputs: rewriteInputs ?? phaseInfo.inputs,
               attachments,
               onProgress: (msg) => {
                 assistantText += msg + '\n';
@@ -921,7 +970,9 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
               },
               onSse: sseWrite,
             });
-            summaryLine = `✓ ${result.frameCount}-frame storyboard generated (intent: ${result.intent})`;
+            summaryLine = rewriteInputs
+              ? `✓ ${result.frameCount}-frame storyboard regenerated (intent: ${result.intent})`
+              : `✓ ${result.frameCount}-frame storyboard generated (intent: ${result.intent})`;
             sseWrite({ type: 'preview_ready', preview_url: `/preview/${id}`, frames: result.frameCount });
             sseWrite({ type: 'message_end', reason: 'ok' });
           } catch (err) {
@@ -2234,6 +2285,18 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     p.push('');
     p.push(`Goal: surface what the video is ABOUT (topic, brand / project name, headline / tagline, key numbers or data points). The user can answer, partially answer, or say "随便发挥 / skip / 不知道" — accept whatever they give and move on.`);
     p.push('');
+    // The user's opening request already names the subject (e.g. "做一个 Open
+    // Design 推广视频"). Lock onto it: don't let a vague follow-up answer like
+    // "随机/随便/anything" silently become a literal NEW topic — that's how a
+    // "promote Open Design" request turned into a probability explainer.
+    {
+      const openingTopic = history.find((m) => m.role === 'user')?.content?.trim().slice(0, 200);
+      if (openingTopic) {
+        p.push(`The user's ORIGINAL opening request was: "${openingTopic}". Treat this as the LOCKED subject of the video unless the user clearly asks to change it.`);
+        p.push(`If the user's answer this turn CONTRADICTS or seems unrelated to that subject (e.g. they opened with a product/brand video but now answer with an off-topic word), do NOT silently switch topics. Ask ONE short clarifying question: keep the original subject (with the new word as a detail/example/angle), or genuinely change the subject? Treat vague answers like "随机 / 随便 / anything / 你定 / whatever" as "you decide the details, KEEP the original subject" — never as a literal new topic.`);
+        p.push('');
+      }
+    }
     if (turns.length === 0) {
       p.push(`This is the first content turn. Ask 1–3 short, sharp questions, in the user's language. Keep it under 60 words. Mention they can answer fully, partially, or just say "skip" / "随便".`);
     } else {
@@ -2412,6 +2475,18 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     }, null, 2));
     p.push('```');
     p.push('');
+    // Soft gate: if the subject is too thin to make a meaningful video, nudge
+    // the user to add a concrete topic/brand/number — but never block, the card
+    // still ships with both actions so they can proceed as-is.
+    const contentBlob = contentTurns.join(' ').trim();
+    const topicThin =
+      attachments.length === 0 &&
+      (contentBlob.replace(/\s/g, '').length < 8 ||
+        /^(随机|随便|anything|random|whatever|都行|你定|skip|不知道)$/i.test(contentBlob));
+    if (topicThin) {
+      p.push(`NOTE: the collected content ("${contentBlob || '(empty)'}") is very thin / vague. BEFORE the hv-confirm block, add ONE short friendly sentence in the user's language gently flagging that the topic is sparse and inviting them to add a concrete subject / brand / key number for a stronger video — but STILL emit the hv-confirm block exactly as above so they can generate anyway if they want.`);
+      p.push('');
+    }
     p.push(`Do NOT write HTML this turn. Do NOT return an empty reply. The hv-confirm block is REQUIRED.`);
     return p.join('\n');
   }
@@ -2760,6 +2835,59 @@ interface SplitGenerateArgs {
   onProgress: (msg: string) => void;
   /** Called for structured SSE events. */
   onSse: (obj: unknown) => void;
+}
+
+type IterateIntent = 'rewrite-all' | 'edit-visual' | 'edit-frame';
+
+/**
+ * Classify what an iterate-phase instruction wants on a MULTI-FRAME project
+ * when no specific frame is pinned. The studio used to treat every iterate as
+ * a single-frame / preview rewrite, so "内容改一下，基于 Open Design 来写" only
+ * touched one frame's HTML and never re-planned the content-graph — the other
+ * frames kept the old subject. This routes a content/subject change to a full
+ * storyboard regeneration instead.
+ *
+ *   rewrite-all  → change the content/subject/topic, "基于 X 重写" → re-plan the
+ *                  whole storyboard (graph + every frame).
+ *   edit-visual  → palette / font / motion / pacing / layout only, narrative
+ *                  unchanged → keep the existing single preview rewrite.
+ *   edit-frame   → a change scoped to one specific frame (but the user didn't
+ *                  pin it) → keep current behavior, the UI can ask them to pin.
+ *
+ * Defaults to `edit-visual` on any ambiguity: a misread there only means we
+ * skip a regeneration (cheap, recoverable), whereas a wrong `rewrite-all`
+ * would discard frames the user may have hand-tuned.
+ */
+async function classifyIterateIntent(
+  def: import('@html-video/runtime').AgentDef,
+  userText: string,
+  hints: { frameCount: number; openingTopic: string; currentSynopsis?: string },
+  cwd: string,
+  model?: string,
+): Promise<IterateIntent> {
+  const prompt = [
+    `You are classifying a single edit instruction for an existing ${hints.frameCount}-frame HTML video.`,
+    `The video's locked subject is: "${hints.openingTopic}".`,
+    hints.currentSynopsis ? `Current storyboard synopsis: "${hints.currentSynopsis}".` : '',
+    `The user just said: "${userText}".`,
+    ``,
+    `Classify the instruction into EXACTLY one of:`,
+    `- rewrite-all : changes the CONTENT / subject / topic / script of the whole video (e.g. "内容改一下，基于 Open Design 来写", "换个主题", "重写文案", "make it about our product", "change the topic"). The narrative itself changes.`,
+    `- edit-visual : changes only VISUALS — colour, font, motion, speed, spacing, layout — narrative unchanged (e.g. "背景换深色", "字大一点", "more minimal", "slower").`,
+    `- edit-frame  : a change aimed at ONE specific frame (e.g. "第二帧的标题改成…", "fix the last slide").`,
+    ``,
+    `Reply with EXACTLY one word: rewrite-all OR edit-visual OR edit-frame. No punctuation, no explanation.`,
+  ].filter(Boolean).join('\n');
+
+  let raw = '';
+  try {
+    raw = (await callAgentSimple(def, prompt, cwd, model)).trim().toLowerCase();
+  } catch {
+    return 'edit-visual';
+  }
+  if (/rewrite-all|rewrite|重写|整片|换成|换个?主题|基于/.test(raw)) return 'rewrite-all';
+  if (/edit-frame|单帧|这一?帧|某一?帧/.test(raw)) return 'edit-frame';
+  return 'edit-visual';
 }
 
 async function runSplitMultiFrameGenerate(
